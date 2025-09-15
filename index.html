@@ -1,13 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html>
   <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>SSR with Vite + React</title>
   </head>
   <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <!-- SSR で差し込まれる場所 -->
+    <div id="root"><!--app--></div>
+
+    <!-- Vite は dev と build で自動で script を挿入（dev モードは Vite が変換） -->
+    <!-- client script はビルド後 dist/client/assets に現れます -->
+    <script type="module" src="/src/entry-client.jsx"></script>
   </body>
 </html>
