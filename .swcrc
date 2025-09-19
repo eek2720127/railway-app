@@ -1,0 +1,21 @@
+{
+  "jsc": {
+    "parser": {
+      "syntax": "ecmascript",
+      "jsx": true,
+      "dynamicImport": true
+    },
+    "transform": {
+      "react": {
+        "runtime": "automatic",
+        "development": false,
+        "useBuiltins": true
+      }
+    },
+    "target": "es2022"
+  },
+  "module": {
+    "type": "es6"
+  },
+  "sourceMaps": true
+}

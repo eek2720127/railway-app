@@ -1,4 +1,4 @@
-// server.js (ESM対応・dist/index.html を使う版)
+// server.js (ESM) - 簡潔版
 import fs from "fs";
 import path from "path";
 import express from "express";
@@ -9,8 +9,15 @@ const isProd = process.env.NODE_ENV === "production";
 async function createServer() {
   const app = express();
 
+  const distPath = path.resolve(process.cwd(), "dist");
+
+  // 共通ヘルパー: HTML をクライアントに返す
+  const renderAndSend = (res, html, status = 200) => {
+    res.status(status).type("html").send(html);
+  };
+
   if (!isProd) {
-    // development: vite middleware
+    // ---- Development ----
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: "ssr" },
@@ -23,47 +30,81 @@ async function createServer() {
       try {
         let template = fs.readFileSync(path.resolve("index.html"), "utf-8");
         template = await vite.transformIndexHtml(url, template);
-
         const mod = await vite.ssrLoadModule("/src/entry-server.jsx");
         const appHtml = await mod.render(url);
-
-        const html = template.replace("<!--app-->", appHtml);
-        res.status(200).set({ "Content-Type": "text/html" }).end(html);
-      } catch (e) {
-        vite.ssrFixStacktrace(e);
-        console.error(e);
-        res.status(500).end(e.stack);
+        console.log(
+          ">>> SSR HTML (dev preview):",
+          String(appHtml).slice(0, 400)
+        );
+        renderAndSend(res, template.replace("<!--app-->", appHtml));
+      } catch (err) {
+        vite.ssrFixStacktrace(err);
+        console.error("Dev SSR error:", err);
+        renderAndSend(res, String(err.stack || err), 500);
       }
     });
   } else {
-    // production: serve dist (index.html at dist/index.html)
-    const distPath = path.resolve("dist");
-    // serve static files from dist (assets/ etc.)
+    // ---- Production ----
     app.use(express.static(distPath, { index: false }));
+
+    // preload template and SSR bundle at startup for performance
+    const templatePath = path.resolve(distPath, "index.html");
+    if (!fs.existsSync(templatePath)) {
+      console.error("Production index.html not found at", templatePath);
+      // keep server running but serve a helpful message on requests
+      app.use("*", (req, res) =>
+        res.status(500).send("index.html not found. Run build.")
+      );
+      return { app };
+    }
+    const template = fs.readFileSync(templatePath, "utf-8");
+
+    const ssrBundlePath = path.resolve(
+      distPath,
+      "server-ssr",
+      "entry-server.js"
+    );
+    let renderFn = null;
+    if (fs.existsSync(ssrBundlePath)) {
+      try {
+        const serverModule = await import(pathToFileURL(ssrBundlePath).href);
+        // named export 'render' or default.render
+        renderFn =
+          typeof serverModule.render === "function"
+            ? serverModule.render
+            : serverModule.default &&
+                typeof serverModule.default.render === "function"
+              ? serverModule.default.render
+              : null;
+
+        if (!renderFn) {
+          console.warn(
+            "SSR bundle found but no render() export. Keys:",
+            Object.keys(serverModule)
+          );
+        }
+      } catch (err) {
+        console.error("Failed to import SSR bundle:", ssrBundlePath, err);
+      }
+    } else {
+      console.warn("SSR bundle not found at", ssrBundlePath);
+    }
 
     app.use("*", async (req, res) => {
       try {
-        const url = req.originalUrl;
-        // read the generated index.html from dist
-        const template = fs.readFileSync(
-          path.resolve(distPath, "index.html"),
-          "utf-8"
+        if (!renderFn) {
+          // no SSR available: serve static template
+          return renderAndSend(res, template);
+        }
+        const appHtml = await renderFn(req.originalUrl);
+        console.log(
+          ">>> SSR HTML (prod preview):",
+          String(appHtml).slice(0, 400)
         );
-
-        // import the server bundle that Vite produced into dist/server
-        const serverBundlePath = path.resolve(
-          distPath,
-          "server",
-          "entry-server.js"
-        );
-        const serverModule = await import(pathToFileURL(serverBundlePath).href);
-
-        const appHtml = await serverModule.render(url);
-        const html = template.replace("<!--app-->", appHtml);
-        res.status(200).set({ "Content-Type": "text/html" }).end(html);
-      } catch (e) {
-        console.error(e);
-        res.status(500).end(e.stack);
+        renderAndSend(res, template.replace("<!--app-->", appHtml));
+      } catch (err) {
+        console.error("Production SSR error:", err);
+        renderAndSend(res, "Internal Server Error", 500);
       }
     });
   }
@@ -71,6 +112,7 @@ async function createServer() {
   return { app };
 }
 
+// 起動
 const { app } = await createServer();
 const port = process.env.PORT || 3000;
 app.listen(port, () => {

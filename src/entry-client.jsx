@@ -3,7 +3,13 @@ import React from "react";
 import { hydrateRoot } from "react-dom/client";
 import App from "./App";
 
-hydrateRoot(document.getElementById("root"), <App />);
+const rootEl = document.getElementById("root");
 
-// ここはクライアントでしか実行されないので安全にログを出せます
+// (任意) ログ：サーバHTMLの先頭を一時出す（デバッグ用）
+console.log(
+  ">>> server HTML (preview):",
+  rootEl ? rootEl.innerHTML.slice(0, 200) : "<no root>"
+);
+
+hydrateRoot(rootEl, <App />);
 console.log("✅ client hydrated (entry-client)");
