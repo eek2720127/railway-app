@@ -1,4 +1,4 @@
-// server.js (ESM) - 簡潔版
+// server.js (ESM) - 404 判定を追加した改良版
 import fs from "fs";
 import path from "path";
 import express from "express";
@@ -8,12 +8,31 @@ const isProd = process.env.NODE_ENV === "production";
 
 async function createServer() {
   const app = express();
-
   const distPath = path.resolve(process.cwd(), "dist");
 
-  // 共通ヘルパー: HTML をクライアントに返す
+  // helper: send HTML
   const renderAndSend = (res, html, status = 200) => {
     res.status(status).type("html").send(html);
+  };
+
+  // Simple API for demo
+  app.get("/api/item/:id", (req, res) => {
+    const { id } = req.params;
+    const item = {
+      id,
+      title: `データ #${id}`,
+      body: `これはサーバーが返したダミーデータです（id=${id}）。`,
+    };
+    res.json({ item });
+  });
+
+  // small helper: detect 404 text in SSR output
+  const containsNotFound = (htmlFragment) => {
+    if (!htmlFragment) return false;
+    return (
+      String(htmlFragment).includes("404 - ページが見つかりません") ||
+      String(htmlFragment).includes("404 - ページが見つかりません")
+    );
   };
 
   if (!isProd) {
@@ -30,13 +49,54 @@ async function createServer() {
       try {
         let template = fs.readFileSync(path.resolve("index.html"), "utf-8");
         template = await vite.transformIndexHtml(url, template);
+
         const mod = await vite.ssrLoadModule("/src/entry-server.jsx");
-        const appHtml = await mod.render(url);
+        const maybeRender =
+          typeof mod.render === "function"
+            ? mod.render
+            : mod.default && typeof mod.default.render === "function"
+              ? mod.default.render
+              : null;
+        const appHtml = maybeRender ? await maybeRender(url) : "";
+
+        // If render returned an object { html, status }, normalize:
+        let htmlFragment = "";
+        let status = 200;
+        if (appHtml == null) {
+          htmlFragment = "";
+        } else if (typeof appHtml === "string") {
+          htmlFragment = appHtml;
+        } else if (
+          typeof appHtml === "object" &&
+          typeof appHtml.html === "string"
+        ) {
+          htmlFragment = appHtml.html;
+          status = typeof appHtml.status === "number" ? appHtml.status : status;
+        } else {
+          htmlFragment = String(appHtml);
+        }
+
+        // simple 404 detection: if HTML fragment contains "404 - ページが見つかりません", set 404 status (unless render already set status)
+        if (status === 200 && containsNotFound(htmlFragment)) {
+          status = 404;
+        }
+
         console.log(
           ">>> SSR HTML (dev preview):",
-          String(appHtml).slice(0, 400)
+          String(htmlFragment).slice(0, 400)
         );
-        renderAndSend(res, template.replace("<!--app-->", appHtml));
+
+        let full = template.replace("<!--app-->", htmlFragment);
+
+        // support no-js demo via ?nojs=1
+        if (req.query && req.query.nojs === "1") {
+          full = full.replace(
+            /<script[^>]*type=["']module["'][\s\S]*?<\/script>\s*/gi,
+            ""
+          );
+        }
+
+        renderAndSend(res, full, status);
       } catch (err) {
         vite.ssrFixStacktrace(err);
         console.error("Dev SSR error:", err);
@@ -47,13 +107,11 @@ async function createServer() {
     // ---- Production ----
     app.use(express.static(distPath, { index: false }));
 
-    // preload template and SSR bundle at startup for performance
     const templatePath = path.resolve(distPath, "index.html");
     if (!fs.existsSync(templatePath)) {
       console.error("Production index.html not found at", templatePath);
-      // keep server running but serve a helpful message on requests
       app.use("*", (req, res) =>
-        res.status(500).send("index.html not found. Run build.")
+        res.status(500).send("index.html not found. Run build first.")
       );
       return { app };
     }
@@ -65,21 +123,24 @@ async function createServer() {
       "entry-server.js"
     );
     let renderFn = null;
+
     if (fs.existsSync(ssrBundlePath)) {
       try {
         const serverModule = await import(pathToFileURL(ssrBundlePath).href);
-        // named export 'render' or default.render
-        renderFn =
-          typeof serverModule.render === "function"
-            ? serverModule.render
-            : serverModule.default &&
-                typeof serverModule.default.render === "function"
-              ? serverModule.default.render
-              : null;
+
+        if (typeof serverModule.render === "function") {
+          renderFn = serverModule.render;
+        } else if (serverModule.default) {
+          if (typeof serverModule.default === "function") {
+            renderFn = serverModule.default;
+          } else if (typeof serverModule.default.render === "function") {
+            renderFn = serverModule.default.render;
+          }
+        }
 
         if (!renderFn) {
           console.warn(
-            "SSR bundle found but no render() export. Keys:",
+            "SSR bundle found but no usable render() export. Keys:",
             Object.keys(serverModule)
           );
         }
@@ -93,15 +154,45 @@ async function createServer() {
     app.use("*", async (req, res) => {
       try {
         if (!renderFn) {
-          // no SSR available: serve static template
           return renderAndSend(res, template);
         }
-        const appHtml = await renderFn(req.originalUrl);
+
+        const rv = await renderFn(req.originalUrl);
+
+        // normalize return value
+        let htmlFragment = "";
+        let status = 200;
+        if (rv == null) {
+          htmlFragment = "";
+        } else if (typeof rv === "string") {
+          htmlFragment = rv;
+        } else if (typeof rv === "object" && typeof rv.html === "string") {
+          htmlFragment = rv.html;
+          status = typeof rv.status === "number" ? rv.status : status;
+        } else {
+          htmlFragment = String(rv);
+        }
+
+        // ここで簡易 404 検出（render が status を既にセットしていなければ）
+        if (status === 200 && containsNotFound(htmlFragment)) {
+          status = 404;
+        }
+
         console.log(
           ">>> SSR HTML (prod preview):",
-          String(appHtml).slice(0, 400)
+          String(htmlFragment).slice(0, 400)
         );
-        renderAndSend(res, template.replace("<!--app-->", appHtml));
+
+        let full = template.replace("<!--app-->", htmlFragment);
+
+        if (req.query && req.query.nojs === "1") {
+          full = full.replace(
+            /<script[^>]*type=["']module["'][\s\S]*?<\/script>\s*/gi,
+            ""
+          );
+        }
+
+        renderAndSend(res, full, status);
       } catch (err) {
         console.error("Production SSR error:", err);
         renderAndSend(res, "Internal Server Error", 500);
@@ -112,7 +203,7 @@ async function createServer() {
   return { app };
 }
 
-// 起動
+// start server
 const { app } = await createServer();
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
